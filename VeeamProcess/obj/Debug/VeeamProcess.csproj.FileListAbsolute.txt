@@ -1,0 +1,6 @@
+C:\Users\timot_000\Documents\SharpDevelop Projects\VeeamProcess\VeeamProcess\obj\Debug\VeeamProcess.csprojResolveAssemblyReference.cache
+C:\Users\timot_000\Documents\SharpDevelop Projects\VeeamProcess\VeeamProcess\bin\Debug\VeeamProcess.exe.config
+C:\Users\timot_000\Documents\SharpDevelop Projects\VeeamProcess\VeeamProcess\bin\Debug\VeeamProcess.exe
+C:\Users\timot_000\Documents\SharpDevelop Projects\VeeamProcess\VeeamProcess\bin\Debug\VeeamProcess.pdb
+C:\Users\timot_000\Documents\SharpDevelop Projects\VeeamProcess\VeeamProcess\obj\Debug\VeeamProcess.exe
+C:\Users\timot_000\Documents\SharpDevelop Projects\VeeamProcess\VeeamProcess\obj\Debug\VeeamProcess.pdb
