@@ -16,9 +16,31 @@ using System.Xml;
 using System.Net;
 using System.Text;
 using System.Collections.Specialized;
+using System.Net.NetworkInformation;
 
 namespace VeeamProcess
 {
+	/*
+	 * Answer deserialization, should become std way of getting feedback 
+	 * 
+	 * 
+	 */
+	[Serializable()]
+	public class Answer
+	{
+	    [System.Xml.Serialization.XmlElement("Error")]
+	    public string Error { get; set; }
+	
+	    [System.Xml.Serialization.XmlElement("Success")]
+	    public string Success { get; set; }
+	
+	    [System.Xml.Serialization.XmlElement("Cn")]
+	    public ulong Cn { get; set; }
+	}
+	
+	/*
+	 * Construction of the updatepost, by serializing, you will get perfect output 
+	 */
 	[XmlRootAttribute("UpdatePost")]
 	public class UpdatePost
 	{
@@ -29,20 +51,39 @@ namespace VeeamProcess
 		public string server;
 		[XmlElement("Date")]
 		public int date;
-
+		[XmlElement("Cn")]
+		public ulong cn;
+		[XmlElement("Stats")]
+		public VeeamServerStat stats;
 		
 		public 	UpdatePost() {
 			
 		}
-		public 	UpdatePost(List<VeeamProcess> p,string server) {
+		public 	UpdatePost(List<VeeamProcess> p,VeeamServerStat stats, string server,ulong cn) {
 			this.veeamProcesses = p;
 			this.server = server;
+			this.stats = stats;
 			TimeSpan t = DateTime.UtcNow - new DateTime(1970, 1, 1);
 			this.date = (int)t.TotalSeconds;
-			
+			this.cn = cn;
 		}
 	}
-	
+	public class VeeamServerStat
+	{
+		[XmlElement("NetBytesPerSec")]
+		public ulong NetBytesPerSec;
+		[XmlElement("DiskBytesPerSec")]
+		public ulong DiskBytesPerSec;
+		[XmlElement("Cores")]
+		public uint Cores;
+		
+		public VeeamServerStat() {}
+		public VeeamServerStat(ulong NetBytesPerSec,ulong DiskBytesPerSec,uint cores) {
+			this.NetBytesPerSec = NetBytesPerSec;
+			this.DiskBytesPerSec = DiskBytesPerSec;
+			this.Cores = cores;
+		}
+	}
 	public class VeeamProcess 
 	{
 		[XmlElement("ProcessName")]
@@ -72,7 +113,9 @@ namespace VeeamProcess
 	{
 		[XmlElement("IOBytesPerSec")]
 		public ulong IOBytesPerSec;
+		[XmlElement("WorkingSetPrivate")]
 		public ulong WorkingSetPrivate;
+		[XmlElement("CpuPct")]
 		public float CpuPct;
 		
 		public VeeamProcessStat() {}
@@ -81,53 +124,183 @@ namespace VeeamProcess
 			this.WorkingSetPrivate = WorkingSetPrivate;
 			this.CpuPct = CpuPct;
 		}
+		
 	}
-	class VeeamProccessControler {
+	
+	
+	/*
+	 * Classes for intermediate storing of results between runs
+	 * This insure more avg values between updates as we use raw classes instead of precooked data.
+	 */
+	public class RawVeeamProcessStat 
+	{
+		public ulong TimeStamp { get; set; }
+		public ulong Frequency { get; set; }
+		public ulong Timestamp_Sys100NS {get;set;}
+		public ulong IOBytesPerSec { get; set; }
+		public ulong WorkingSetPrivate { get; set; }
+		public float CpuPct { get; set; }
+		
+		
+		public RawVeeamProcessStat(ulong timeStamp, ulong frequency, ulong Timestamp_Sys100NS, ulong iOBytesPerSec, ulong workingSetPrivate, float cpuPct)
+		{
+			this.TimeStamp = timeStamp;
+			this.Frequency = frequency;
+			this.Timestamp_Sys100NS = Timestamp_Sys100NS;
+			
+			this.IOBytesPerSec = iOBytesPerSec;
+			this.WorkingSetPrivate = workingSetPrivate;
+			this.CpuPct = cpuPct;
+			
+		}
+		public RawVeeamProcessStat()
+		{
+			
+		}
+	}
+
+	public class RawVeeamServerStatBytes 
+	{
+		public ulong TimeStamp { get; set; }
+		public ulong Frequency { get; set; }
+		public ulong BytesPerSec { get; set; }
+
+		
+		public RawVeeamServerStatBytes(ulong timeStamp, ulong frequency, ulong bytesPerSec)
+		{
+			this.TimeStamp = timeStamp;
+			this.Frequency = frequency;
+			this.BytesPerSec = bytesPerSec;
+		}
+		public RawVeeamServerStatBytes()
+		{
+			
+		}
+		public void addBytes(ulong add) {
+			this.BytesPerSec += add;
+		}
+	}	
+	
+	
+	/*
+	 * Controller that generates performance stats 
+	 * In a seperate class so logic might (maybe not use slow WMI queries in the future)
+	 * 
+	 */
+	public class VeeamProccessControler {
 		private ManagementObjectSearcher commandLineSearcher;
 		private ManagementObjectSearcher procStatQ;
-		private float cores;
+		private ManagementObjectSearcher networkQ;
+		private ManagementObjectSearcher diskQ;
+
+		private Dictionary<uint,RawVeeamProcessStat> proccache;
+		
+		private RawVeeamServerStatBytes net;
+		private RawVeeamServerStatBytes disk;
+	
+		
+		public uint cores {get;set;}
 		
 		public VeeamProccessControler() {
 			this.commandLineSearcher = new ManagementObjectSearcher("SELECT Name,CommandLine,ExecutablePath,ProcessId,ParentProcessId FROM Win32_Process WHERE NAME Like '[Vv]eeam%'");
-			this.procStatQ = new ManagementObjectSearcher("SELECT * FROM Win32_PerfFormattedData_PerfProc_Process WHERE NAME Like '[Vv]eeam%'");
-			
-			
-			//initial set so we don't get empty val
-			this.commandLineSearcher.Get();
-			this.procStatQ.Get();
+			this.procStatQ = new ManagementObjectSearcher("SELECT * FROM Win32_PerfRawData_PerfProc_Process WHERE NAME Like '[Vv]eeam%'");
+			this.networkQ = new ManagementObjectSearcher("SELECT BytesTotalPersec,Frequency_PerfTime,Timestamp_PerfTime  FROM Win32_PerfRawData_Tcpip_NetworkInterface");
+			this.diskQ = new ManagementObjectSearcher("SELECT DiskBytesPersec,Frequency_PerfTime,Timestamp_PerfTime FROM Win32_PerfRawData_PerfDisk_PhysicalDisk WHERE NAME Like '_Total'");
+	
 			
 			var cs = new ManagementObjectSearcher("select NumberOfLogicalProcessors from win32_processor");
 			cs.Get();
 			foreach (ManagementObject mo in cs.Get()) {
-				this.cores = (float)((uint)mo["NumberOfLogicalProcessors"]);
+				this.cores =(uint)mo["NumberOfLogicalProcessors"];
 			}
-			Console.WriteLine(cores);
+			this.proccache = new Dictionary<uint, RawVeeamProcessStat>();
+			
+			this.getServerUsage();
+			this.getProc();
 					
 		}
-					
-		public List<VeeamProcess> get() {
+
+		public VeeamServerStat getServerUsage() {
+			RawVeeamServerStatBytes netstat = null;
+			foreach (ManagementObject mo in this.networkQ.Get()) {
+				if (netstat == null) {
+					netstat = new RawVeeamServerStatBytes((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)mo["BytesTotalPersec"]);
+				} else {
+					netstat.addBytes((ulong)mo["BytesTotalPersec"]);
+				}
+				
+			}
+			RawVeeamServerStatBytes diskstat = null;
+			foreach (ManagementObject mo in this.diskQ.Get()) {
+				if (diskstat == null) {
+					diskstat = new RawVeeamServerStatBytes((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)mo["DiskBytesPersec"]);
+				} else {
+					netstat.addBytes((ulong)mo["DiskBytesPersec"]);
+				}
+				
+			}			
+			
+			var stat = new VeeamServerStat(0,0,this.cores);
+			
+			if (this.net != null) {
+				stat.NetBytesPerSec = (ulong)((double)(netstat.BytesPerSec-this.net.BytesPerSec)/(((double)(netstat.TimeStamp-this.net.TimeStamp))/netstat.Frequency));
+			} 
+			this.net = netstat;
+			
+			if (this.disk != null) {
+				stat.DiskBytesPerSec = (ulong)((double)(diskstat.BytesPerSec-this.disk.BytesPerSec)/(((double)(diskstat.TimeStamp-this.disk.TimeStamp))/netstat.Frequency));
+			} 
+			this.disk = diskstat;
+			
+			
+			return stat;
+		}
+		public List<VeeamProcess> getProc() {
 			var vprocs = new List<VeeamProcess>();
 			var stats = new Dictionary<uint, VeeamProcessStat>();
-			foreach (ManagementObject mo in procStatQ.Get()) {
-				var cpupct = ((float)(ulong)mo["PercentProcessorTime"])/this.cores;
-				stats.Add((uint)mo["IDProcess"],new VeeamProcessStat((ulong)mo["IOOtherBytesPerSec"],
-				                                                     (ulong)mo["WorkingSetPrivate"],
-				                                                     cpupct
-				                                                    ));
-			}
 			
+			
+			foreach (ManagementObject mo in procStatQ.Get()) {
+				var cpupct = ((float)(ulong)mo["PercentProcessorTime"]);
+				var io = (ulong)mo["IODataBytesPersec"];
+				var mem = (ulong)mo["WorkingSetPrivate"];
+				var time = (ulong)mo["Timestamp_PerfTime"];
+				var freq = (ulong)mo["Frequency_PerfTime"];
+				var sys100ns = (ulong)mo["Timestamp_Sys100NS"];
+				var pid = (uint)mo["IDProcess"];
+				
+				var stat = new RawVeeamProcessStat(time,freq,sys100ns,io,mem,cpupct);
+				
+				if ( this.proccache.ContainsKey(pid) ) {
+					var old = this.proccache[pid];
+					
+					
+					double tio = ((double)(stat.TimeStamp-old.TimeStamp))/stat.Frequency;
+					//System.Console.WriteLine(tio);
+					ulong realio =  (ulong)((double)(stat.IOBytesPerSec-old.IOBytesPerSec)/tio);
+					ulong realmem = (ulong)(stat.WorkingSetPrivate);
+					float realcpu = (float)((double)(stat.CpuPct-old.CpuPct)*100/((stat.Timestamp_Sys100NS-old.Timestamp_Sys100NS)));
+					
+					stats[pid] = new VeeamProcessStat(realio,realmem,realcpu);
+					
+				}
+				this.proccache[pid] = stat;
+				
+			}
 			foreach (ManagementObject mo  in commandLineSearcher.Get()) {
 				var procid = (uint)mo["ProcessId"];
 				var newProc = new VeeamProcess((string)mo["Name"],(string)mo["CommandLine"],(string)mo["ExecutablePath"],procid,(uint)mo["ParentProcessId"]);
 				if (stats.ContainsKey(procid)) {
 					newProc.stats = stats[procid];
+				} else {
+					newProc.stats = new VeeamProcessStat(0,0,0);
 				}
-				
-				
+			
 				vprocs.Add(newProc);
 			}
 			return vprocs;
 		}
+		
 			
 	}
 	public class Utf8StringWriter : StringWriter
@@ -138,61 +311,183 @@ namespace VeeamProcess
 	         get { return new UTF8Encoding(false); } 
 	    }
 	}
+	
+
+	/*
+	 * Main program, use the collector to get the data and then post via http in a loop
+	 * 
+	 */
 	class Program
 	{
+		//http://stackoverflow.com/questions/804700/how-to-find-fqdn-of-local-machine-in-c-net
+		public static string GetFQDN()
+		{
+		    string domainName = IPGlobalProperties.GetIPGlobalProperties().DomainName;
+		    string hostName = Dns.GetHostName();
+		
+		    string dotDomainName = "." + domainName;
+		    if(domainName != "" && !hostName.EndsWith(dotDomainName))  // if hostname does not already include domain name
+		    {
+		        hostName += dotDomainName;   // add the domain name part
+		    }
+		
+		    return hostName;                    // return the fully qualified name
+		}
+		
+		public static Answer DeserializeAnswer(byte[] response) {
+			Answer a = new Answer();
+			a.Error = "Unmarshall Error";
+	        
+			try {
+				MemoryStream stream = new MemoryStream(response);
+				StreamReader reader = new StreamReader(stream);
+				
+				var xa = new XmlSerializer(typeof(Answer));
+				a = (Answer)xa.Deserialize(reader);
+			} catch (Exception e) {
+				a.Error += e.Message;
+			}
+			return a;
+		}
+		
 		public static void Main(string[] args)
 		{
-			if (args.Length > 1) {
+			if (args.Length > 0) {
 				var ctr =  new VeeamProccessControler();
 				
-				string server = args[0];
-				string key = args[1];
+				string server = "127.0.0.1";
+				string key = "";
 				int port = 46101;
-				if (args.Length > 2) {
-					port = Int32.Parse(args[2]);
+				string servername = GetFQDN();
+				int naptime = 10000;
+				ulong cn = 0;
+				
+				int unam=0;
+				System.Text.RegularExpressions.Regex r = new System.Text.RegularExpressions.Regex("\\-([a-z])+=[\"']?(.*)[\"']?$");
+				foreach (string arg in args) {
+					var m = r.Match(arg);
+					if (m.Success) {
+						var g = m.Groups;
+						switch (g[1].Value) {
+							case "k":
+								key = g[2].Value;
+								break;
+							case "s":
+								server = g[2].Value;
+								break;
+							case "p":
+								port =  Int32.Parse(g[2].Value);
+								break;
+							case "c":
+								servername = g[2].Value;
+								break;
+							case "n":
+								naptime =  Int32.Parse(g[2].Value);
+								break;
+							case "f":
+								cn =  UInt64.Parse(g[2].Value);
+								break;
+								
+						}
+					} else {
+						switch (unam) {
+							case 0:
+								server = arg;
+								break;
+							case 1:
+								key = arg;
+								break;		
+							case 2:
+								port =  Int32.Parse(arg);
+								break;
+							case 3:
+								servername = arg;
+								break;
+						}
+						unam++;
+					}
 				}
 				
-				string url = String.Format("http://{0}:{1}/postproc",server,port);
+				System.Console.WriteLine(String.Format("Server {0};\nKey \t{1};\nPort \t{2}; \nClientName \t{3}",server,key,port,servername));
 				
-				bool stopagent = false;
-				
-				string hostname = Dns.GetHostName();
-
-				
-				while (!stopagent) {
-					Console.WriteLine("Start collecting..");
-					var x = new System.Xml.Serialization.XmlSerializer(typeof(UpdatePost));
 					
-					var writer = new Utf8StringWriter();
-					x.Serialize(writer,new UpdatePost(ctr.get(),hostname));
+				
+				
+				var wb = new WebClient();
+				if (cn == 0) {
+					string cnqueryurl = String.Format("http://{0}:{1}/cnquery",server,port);
 					
-					Console.WriteLine("Uploading..");
-					var wb = new WebClient();
 					var data = new NameValueCollection();
-    				data["key"] = key;
-    				data["update"] = writer.ToString();
-
-    				try {
-				    	var response = wb.UploadValues(url, "POST", data);
-				    	var responseString = System.Text.Encoding.UTF8.GetString(response);
-				    	
-				    	if (responseString == "Stopnow") {
-				    		Console.WriteLine("Stopping");
-				    		stopagent = true;
-				    	} else {
-				    		Console.WriteLine("Succesful : "+responseString);
-				    	}
-    				} catch (Exception e) {
-    					Console.WriteLine("Failure to upload "+e.Message);
-    					Console.WriteLine("Data lost : "+data["update"]);
-    				}
-    				if (!stopagent) {
-						System.Threading.Thread.Sleep(10000);
-    				}
-					
+	    			data["key"] = key;
+	    			data["server"] = servername;
+	    			try {
+	    				var response = wb.UploadValues(cnqueryurl, "POST", data);
+	    				var a =  DeserializeAnswer(response);
+	    				
+	    				if (a.Success == "OK") {
+	    					cn = a.Cn;
+	    					Console.WriteLine("Fetched Cn "+cn);
+	    				} else {
+	    					throw (new Exception("Error while fetching Cn "+a.Error));
+	    				}
+	    			} catch (Exception e) {
+	    				Console.WriteLine("Failure to fetch change number, can force by using -f=1 "+e.Message);
+	    				Console.ReadKey();
+	    			}
+				} else {
+					Console.WriteLine(String.Format("Forced cn {0}",cn));
 				}
+
+    			
+    			if (cn != 0) {
+	    			string url = String.Format("http://{0}:{1}/postproc",server,port);
+					bool stopagent = false;
+					
+					
+					while (!stopagent) {
+						cn++;
+						
+						Console.WriteLine("Start collecting..");
+						var x = new System.Xml.Serialization.XmlSerializer(typeof(UpdatePost));
+						
+						var writer = new Utf8StringWriter();
+						x.Serialize(writer,new UpdatePost(ctr.getProc(),ctr.getServerUsage(),servername,cn));
+						
+						Console.WriteLine("Uploading..");
+						
+						var dataupd = new NameValueCollection();
+	    				dataupd["key"] = key;
+	    				dataupd["update"] = writer.ToString();
+	
+	    				try {
+	    					var response = wb.UploadValues(url, "POST", dataupd);
+					    	var uploadDataA = DeserializeAnswer(response);
+					    	
+					    	if (uploadDataA.Success == "STOP") {
+					    		Console.WriteLine("Stopping");
+					    		stopagent = true;
+					    	} else  if (uploadDataA.Success == "OK") {
+					    		Console.WriteLine("Succesful : "+uploadDataA.Success);
+					    	} else {
+					    		Console.WriteLine("Answer is unknown "+uploadDataA.Error);
+					    		Console.WriteLine(System.Text.Encoding.UTF8.GetString(response));
+								Console.WriteLine(string.Format("Data lost might be lost : {0}", dataupd["update"]));
+					    	}
+	    				} catch (Exception e) {
+	    					Console.WriteLine("Failure to upload "+e.Message);
+							Console.WriteLine(string.Format("Data lost : {0}", dataupd["update"]));
+	    				}
+	    				if (!stopagent) {
+							System.Threading.Thread.Sleep(naptime);
+	    				}
+						
+					}
+    			}
 			} else {
-				Console.WriteLine("<exe> <server> <key> <port>");
+				Console.WriteLine("<exe> [[-s=]server] [[-k=]key] [[-p=]port] [-c=clientname]");
+				Console.WriteLine("f.e <exe> localhost mysecretkey");
+				Console.WriteLine("f.e <exe> -k=mysecretkey -s=localhost ");
+
 			}
 			
 		}
