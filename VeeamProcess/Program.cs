@@ -74,13 +74,16 @@ namespace VeeamProcess
 		public ulong NetBytesPerSec;
 		[XmlElement("DiskBytesPerSec")]
 		public ulong DiskBytesPerSec;
+		[XmlElement("DiskTransfersPerSec")]
+		public ulong DiskTransfersPerSec;
 		[XmlElement("Cores")]
 		public uint Cores;
 		
 		public VeeamServerStat() {}
-		public VeeamServerStat(ulong NetBytesPerSec,ulong DiskBytesPerSec,uint cores) {
+		public VeeamServerStat(ulong NetBytesPerSec,ulong DiskBytesPerSec,ulong DiskTransfersPerSec,uint cores) {
 			this.NetBytesPerSec = NetBytesPerSec;
 			this.DiskBytesPerSec = DiskBytesPerSec;
+			this.DiskTransfersPerSec = DiskTransfersPerSec;
 			this.Cores = cores;
 		}
 	}
@@ -159,25 +162,25 @@ namespace VeeamProcess
 		}
 	}
 
-	public class RawVeeamServerStatBytes 
+	public class RawVeeamServerStatFreqCounter 
 	{
 		public ulong TimeStamp { get; set; }
 		public ulong Frequency { get; set; }
-		public ulong BytesPerSec { get; set; }
+		public ulong Counter { get; set; }
 
 		
-		public RawVeeamServerStatBytes(ulong timeStamp, ulong frequency, ulong bytesPerSec)
+		public RawVeeamServerStatFreqCounter(ulong timeStamp, ulong frequency, ulong counterpersec)
 		{
 			this.TimeStamp = timeStamp;
 			this.Frequency = frequency;
-			this.BytesPerSec = bytesPerSec;
+			this.Counter = counterpersec;
 		}
-		public RawVeeamServerStatBytes()
+		public RawVeeamServerStatFreqCounter()
 		{
 			
 		}
-		public void addBytes(ulong add) {
-			this.BytesPerSec += add;
+		public void addUnit(ulong add) {
+			this.Counter += add;
 		}
 	}	
 	
@@ -195,8 +198,11 @@ namespace VeeamProcess
 
 		private Dictionary<uint,RawVeeamProcessStat> proccache;
 		
-		private RawVeeamServerStatBytes net;
-		private RawVeeamServerStatBytes disk;
+		private RawVeeamServerStatFreqCounter net;
+		private RawVeeamServerStatFreqCounter disk;
+		private RawVeeamServerStatFreqCounter diskIo;
+
+
 	
 		
 		public uint cores {get;set;}
@@ -205,7 +211,7 @@ namespace VeeamProcess
 			this.commandLineSearcher = new ManagementObjectSearcher("SELECT Name,CommandLine,ExecutablePath,ProcessId,ParentProcessId FROM Win32_Process WHERE NAME Like '[Vv]eeam%'");
 			this.procStatQ = new ManagementObjectSearcher("SELECT * FROM Win32_PerfRawData_PerfProc_Process WHERE NAME Like '[Vv]eeam%'");
 			this.networkQ = new ManagementObjectSearcher("SELECT BytesTotalPersec,Frequency_PerfTime,Timestamp_PerfTime  FROM Win32_PerfRawData_Tcpip_NetworkInterface");
-			this.diskQ = new ManagementObjectSearcher("SELECT DiskBytesPersec,Frequency_PerfTime,Timestamp_PerfTime FROM Win32_PerfRawData_PerfDisk_PhysicalDisk WHERE NAME Like '_Total'");
+			this.diskQ = new ManagementObjectSearcher("SELECT DiskBytesPersec,Frequency_PerfTime,Timestamp_PerfTime,DiskTransfersPerSec FROM Win32_PerfRawData_PerfDisk_PhysicalDisk WHERE NAME Like '_Total'");
 	
 			
 			var cs = new ManagementObjectSearcher("select NumberOfLogicalProcessors from win32_processor");
@@ -217,41 +223,54 @@ namespace VeeamProcess
 			
 			this.getServerUsage();
 			this.getProc();
+
 					
 		}
 
 		public VeeamServerStat getServerUsage() {
-			RawVeeamServerStatBytes netstat = null;
+			RawVeeamServerStatFreqCounter netstat = null;
 			foreach (ManagementObject mo in this.networkQ.Get()) {
 				if (netstat == null) {
-					netstat = new RawVeeamServerStatBytes((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)mo["BytesTotalPersec"]);
+					netstat = new RawVeeamServerStatFreqCounter((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)mo["BytesTotalPersec"]);
 				} else {
-					netstat.addBytes((ulong)mo["BytesTotalPersec"]);
+					netstat.addUnit((ulong)mo["BytesTotalPersec"]);
 				}
 				
 			}
-			RawVeeamServerStatBytes diskstat = null;
+			RawVeeamServerStatFreqCounter diskstat = null;
+			RawVeeamServerStatFreqCounter diskstatio = null;
 			foreach (ManagementObject mo in this.diskQ.Get()) {
 				if (diskstat == null) {
-					diskstat = new RawVeeamServerStatBytes((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)mo["DiskBytesPersec"]);
+					diskstat = new RawVeeamServerStatFreqCounter((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)mo["DiskBytesPersec"]);
 				} else {
-					netstat.addBytes((ulong)mo["DiskBytesPersec"]);
+					diskstat.addUnit((ulong)mo["DiskBytesPersec"]);
+				}
+				
+				if (diskstatio == null) {
+					diskstatio = new RawVeeamServerStatFreqCounter((ulong)mo["Timestamp_PerfTime"],(ulong)mo["Frequency_PerfTime"],(ulong)((uint)mo["DiskTransfersPerSec"]));
+				} else {
+					diskstatio.addUnit((ulong)((ulong)mo["DiskTransfersPerSec"]));
 				}
 				
 			}			
-			
-			var stat = new VeeamServerStat(0,0,this.cores);
+						
+			var stat = new VeeamServerStat(0,0,0,this.cores);
 			
 			if (this.net != null) {
-				stat.NetBytesPerSec = (ulong)((double)(netstat.BytesPerSec-this.net.BytesPerSec)/(((double)(netstat.TimeStamp-this.net.TimeStamp))/netstat.Frequency));
+				stat.NetBytesPerSec = (ulong)((double)(netstat.Counter-this.net.Counter)/(((double)(netstat.TimeStamp-this.net.TimeStamp))/netstat.Frequency));
 			} 
 			this.net = netstat;
 			
 			if (this.disk != null) {
-				stat.DiskBytesPerSec = (ulong)((double)(diskstat.BytesPerSec-this.disk.BytesPerSec)/(((double)(diskstat.TimeStamp-this.disk.TimeStamp))/netstat.Frequency));
+				stat.DiskBytesPerSec = (ulong)((double)(diskstat.Counter-this.disk.Counter)/(((double)(diskstat.TimeStamp-this.disk.TimeStamp))/netstat.Frequency));
 			} 
 			this.disk = diskstat;
 			
+			
+			if (this.diskIo != null) {
+				stat.DiskTransfersPerSec = (ulong)((double)(diskstatio.Counter-this.diskIo.Counter)/(((double)(diskstatio.TimeStamp-this.diskIo.TimeStamp))/netstat.Frequency));
+			} 
+			this.diskIo = diskstatio;	
 			
 			return stat;
 		}
